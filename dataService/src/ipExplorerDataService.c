@@ -89,7 +89,7 @@ NMIBufferType *buildAndExecuteNWMService(int *bufferResponseLength,
             zisStatus.nmiReturnCode,
             zisStatus.nmiReasonCode);
     zowedump(NULL, loggingId, ZOWE_LOG_DEBUG3,
-            (char*)nmiBuffer, nmiBuffer->header.NWMBytesNeeded);
+            (char*)nmiBuffer, bufferLength);
 
     if (zisRC != RC_ZIS_SRVC_OK) {
 
