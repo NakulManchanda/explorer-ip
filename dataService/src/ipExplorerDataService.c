@@ -19,6 +19,8 @@
 #include <ezbnmrhc.h>
 #include <ezbnmmpc.h>
 
+#include "stcbase.h"
+#include "stcbackground.h"
 #include "httpserver.h"
 #include "dataservice.h"
 #include "json.h"
@@ -27,6 +29,7 @@
 #include "zssLogging.h"
 
 
+#define GET_MODULE_ID_TO_INDEX(id) ((id)>>16)
 #define NMIBUFSIZE 0x1000
 #define NOT_ENOUGH_SPACE 1122
 
@@ -687,6 +690,9 @@ static int serveMappingService(HttpService *service, HttpResponse *response) {
   return 0;
 }
 
+static void ipExplorerHeartbeat(void* server, void* data) {
+  printf("IP Explorer Heartbeat \n");
+}
 
 void ipExplorerDataServiceInstaller(DataService *dataService, HttpServer *server)
 {
@@ -696,7 +702,9 @@ void ipExplorerDataServiceInstaller(DataService *dataService, HttpServer *server
   httpService->runInSubtask = TRUE;
   httpService->doImpersonation = FALSE;
 
-  loggingId = dataService->loggingIdentifier;
+  loggingId = 0x00111;
+  int moduleId = GET_MODULE_ID_TO_INDEX(STC_MODULE_BACKGROUND);
+  addStcBackgroudTask(server->base->modules[moduleId], &ipExplorerHeartbeat,"EXPLORER_IP_HEARTBEAT_TASK", 10, NULL);
 }
 
 /*

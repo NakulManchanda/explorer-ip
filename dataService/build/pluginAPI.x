@@ -141,3 +141,4 @@
  IMPORT CODE,'zssServer','strupcase'                                           
  IMPORT CODE,'zssServer','makeGeneratedService'                                
  IMPORT CODE,'zssServer','registerHttpService'                                 
+ IMPORT CODE,'zssServer','addStcBackgroudTask'
