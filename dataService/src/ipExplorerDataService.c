@@ -9,6 +9,7 @@
 
   Copyright Contributors to the Zowe Project.
 */
+#define _OPEN_SYS_SOCK_IPV6
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netdb.h>
+#include <fnmatch.h>
 #include <ezbnmrhc.h>
 #include <ezbnmmpc.h>
 
@@ -29,47 +32,341 @@
 
 #define NMIBUFSIZE 0x1000
 #define NOT_ENOUGH_SPACE 1122
+#define MAX_NWM_FILTERS 4
+
+#define FNUMBER1        "1"
+#define FNUMBER2        "2"
+#define FNUMBER3        "3"
+#define FNUMBER4        "4"
+
+#define FCOUNT          "filterCount"
+
+#define FPORTMIN        "fPortMin"
+#define FPORTMAX        "fPortMax"
+#define FPORTRSVNAME    "fPortRsvName"
+
+#define FAPPLDATA       "fApplData"
+#define FASID           "fAsid"
+#define FLOCALIP        "fLocalIp"
+#define FLOCALIPPREFIX  "fLocalIpPrefix"
+#define FLOCALPORT      "fLocalPort"
+#define FREMOTEIP       "fRemoteIp"
+#define FREMOTEIPPREFIX "fRemoteIpPrefix"
+#define FREMOTEPORT     "fRemotePort"
+#define FRESOURCEID     "fResourceId"
+#define FRESOURCENAME   "fResourceName"
+#define FSERVRESOURCEID "fServerResourceId"
+
+#define FFIELDNAME(x,y) x "_" y
+
+#define NMIFILTER(s, n) makeStringParamSpec(FFIELDNAME(FAPPLDATA,s), SERVICE_ARG_OPTIONAL, \
+    makeIntParamSpec(FFIELDNAME(FASID,s), SERVICE_ARG_OPTIONAL | SERVICE_ARG_HAS_VALUE_BOUNDS, 0, 0, 1, 65535, \
+    makeStringParamSpec(FFIELDNAME(FLOCALIP,s), SERVICE_ARG_OPTIONAL, \
+    makeIntParamSpec(FFIELDNAME(FLOCALIPPREFIX,s), SERVICE_ARG_OPTIONAL | SERVICE_ARG_HAS_VALUE_BOUNDS, 0, 0, 0, 128, \
+    makeIntParamSpec(FFIELDNAME(FLOCALPORT,s), SERVICE_ARG_OPTIONAL | SERVICE_ARG_HAS_VALUE_BOUNDS, 0, 0, 1, 65535, \
+    makeStringParamSpec(FFIELDNAME(FREMOTEIP,s), SERVICE_ARG_OPTIONAL, \
+    makeIntParamSpec(FFIELDNAME(FREMOTEIPPREFIX,s), SERVICE_ARG_OPTIONAL | SERVICE_ARG_HAS_VALUE_BOUNDS, 0, 0, 0, 128, \
+    makeIntParamSpec(FFIELDNAME(FREMOTEPORT,s), SERVICE_ARG_OPTIONAL | SERVICE_ARG_HAS_VALUE_BOUNDS, 0, 0, 1, 65535, \
+    makeIntParamSpec(FFIELDNAME(FRESOURCEID,s), SERVICE_ARG_OPTIONAL, 0, 0, 0, 0, \
+    makeStringParamSpec(FFIELDNAME(FRESOURCENAME,s), SERVICE_ARG_OPTIONAL, \
+    makeIntParamSpec(FFIELDNAME(FSERVRESOURCEID,s), SERVICE_ARG_OPTIONAL, 0, 0, 0, 0, n \
+   )))))))))))
 
 uint64 loggingId;
 
 typedef struct NMIBufferType_tag{
   NWMHeader    header;
-  NWMFilter    filters[1];  /* the filters exist in an OR of an and of the properties in the Filterr Object */
+  NWMFilter    filters[MAX_NWM_FILTERS];  /* the filters exist in an OR of an AND of the properties in the NWMFilter Object */
 } NMIBufferType;
+
+void processApplDataFilter(NWMFilter *filter, HttpRequestParam *parm, int filterNumber) {
+  zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Http request parameter: %s=%s for filter number %d\n",
+          parm->specification->name, parm->stringValue, filterNumber);
+
+  filter->NWMFilterFlags |= NWMFILTERAPPLDATAMASK;
+  memset(filter->NWMFilterApplData, ' ', 40);
+  if (strlen(parm->stringValue) > 40) {
+    zowelog(NULL, loggingId, ZOWE_LOG_WARNING,
+          "Http request parameter %s=%s will be truncated.\n",
+          parm->specification->name, parm->stringValue);
+    memcpy(filter->NWMFilterApplData, parm->stringValue, 40);
+  }
+  else {
+    memcpy(filter->NWMFilterApplData, parm->stringValue, strlen(parm->stringValue));
+  }
+}
+
+void processAsidFilter(NWMFilter *filter, HttpRequestParam *parm, int filterNumber) {
+  zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Http request parameter: %s=%d for filter number %d\n",
+          parm->specification->name, parm->intValue, filterNumber);
+
+  filter->NWMFilterFlags |= NWMFILTERASIDMASK;
+  filter->NWMFilterAsid = parm->intValue;
+}
+
+void processIpAddressFilter(NWMFilter *filter, HttpRequestParam *parm, int filterNumber, bool local) {
+  int rc;
+  struct addrinfo hint, *res = NULL;
+
+  zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Http request parameter: %s=%s for filter number %d\n",
+          parm->specification->name, parm->stringValue, filterNumber);
+
+  memset(&hint, 0, sizeof hint);
+  hint.ai_family = PF_UNSPEC;
+  hint.ai_flags = AI_NUMERICHOST;
+
+  rc = getaddrinfo(parm->stringValue, NULL, &hint, &res);
+  if (rc) {
+    zowelog(NULL, loggingId, ZOWE_LOG_WARNING,
+          "Http request parameter error for %s=%s: getaddrinfo() failed with error: %s\n",
+          parm->specification->name, parm->stringValue, gai_strerror(rc));
+    zowelog(NULL, loggingId, ZOWE_LOG_WARNING, "Filter criterion will not be applied.\n");
+    return ;
+  }
+  if (local) {
+    filter->NWMFilterFlags |= NWMFILTERLCLADDRMASK;
+    if (res->ai_family == AF_INET)
+      memcpy(&filter->NWMFilterLocal.NWMFilterLocalAddr4, res->ai_addr, res->ai_addrlen);
+    else
+      memcpy(&filter->NWMFilterLocal.NWMFilterLocalAddr6, res->ai_addr, res->ai_addrlen);
+  } else {
+    filter->NWMFilterFlags |= NWMFILTERRMTADDRMASK;
+    if (res->ai_family == AF_INET)
+      memcpy(&filter->NWMFilterRemote.NWMFilterRemoteAddr4, res->ai_addr, res->ai_addrlen);
+    else
+      memcpy(&filter->NWMFilterRemote.NWMFilterRemoteAddr6, res->ai_addr, res->ai_addrlen);
+  }
+
+  freeaddrinfo(res);
+}
+
+void processIpAddressPrefixFilter(NWMFilter *filter, HttpRequestParam *parm, int filterNumber, bool local) {
+  zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Http request parameter: %s=%d for filter number %d\n",
+          parm->specification->name, parm->intValue, filterNumber);
+
+  if (local) {
+    filter->NWMFilterFlags |= NWMFILTERLCLPFXMASK;
+    filter->NWMFilterLocalPrefix = parm->intValue;
+  } else {
+    filter->NWMFilterFlags |= NWMFILTERRMTPFXMASK;
+    filter->NWMFilterRemotePrefix = parm->intValue;
+  }
+}
+
+void processPortFilter(NWMFilter *filter, HttpRequestParam *parm, int filterNumber, bool local) {
+  zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Http request parameter: %s=%d for filter number %d\n",
+          parm->specification->name, parm->intValue, filterNumber);
+
+  if (local) {
+    filter->NWMFilterFlags |= NWMFILTERLCLPORTMASK;
+    filter->NWMFilterLocal.NWMFilterLocalAddr4.sin_port = parm->intValue;
+  } else {
+    filter->NWMFilterFlags |= NWMFILTERRMTPORTMASK;
+    filter->NWMFilterRemote.NWMFilterRemoteAddr4.sin_port = parm->intValue;
+  }
+}
+
+void processResourceIdFilter(NWMFilter *filter, HttpRequestParam *parm, int filterNumber) {
+  zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Http request parameter: %s=%d for filter number %d\n",
+          parm->specification->name, parm->intValue, filterNumber);
+
+  filter->NWMFilterFlags |= NWMFILTERRESIDMASK;
+  filter->NWMFilterResourceId = parm->intValue;
+}
+
+void processResourceNameFilter(NWMFilter *filter, HttpRequestParam *parm, int filterNumber) {
+  zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Http request parameter: %s=%s for filter number %d\n",
+          parm->specification->name, parm->stringValue, filterNumber);
+
+  filter->NWMFilterFlags |= NWMFILTERRESNAMEMASK;
+  memset(filter->NWMFilterResourceName, ' ', 8);
+  if (strlen(parm->stringValue) > 8) {
+    zowelog(NULL, loggingId, ZOWE_LOG_WARNING,
+          "Http request parameter %s=%s will be truncated.\n",
+          parm->specification->name, parm->stringValue);
+    memcpy(filter->NWMFilterResourceName, parm->stringValue, 8);
+  }
+  else {
+    memcpy(filter->NWMFilterResourceName, parm->stringValue, strlen(parm->stringValue));
+  }
+}
+
+void processServerResourceIdFilter(NWMFilter *filter, HttpRequestParam *parm, int filterNumber) {
+  zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Http request parameter: %s=%d for filter number %d\n",
+          parm->specification->name, parm->intValue, filterNumber);
+
+  filter->NWMFilterFlags |= NWMFILTERLSRESIDMASK;
+  filter->NWMFilterListenerId = parm->intValue;
+}
+
+void configureNWMFilters(NWMFilter *firstNWMFilter, HttpRequestParam *firstParm, int filterCount) {
+  int i, filterNumber;
+  char *del;
+  HttpRequestParam *parm;
+
+  for (parm = firstParm; parm != NULL; parm = parm->next) {
+
+    // Skip parms:
+    //  - not containing the '_' character or
+    //  - having a length of a suffix (after the '_') different than 1 or
+    //  - with the suffix number which is not inside the <1,4> interval
+    // Additionally, a parameter is skipped if the suffix number is greater than "filterCount" parm.
+    // A warning message is issued in that case.
+    if ((del = strchr(parm->specification->name, '_')) == NULL ||
+        parm->specification->name + strlen(parm->specification->name) - (del + 1) != 1 ||
+        (filterNumber = atoi(del + 1)) < 1 || filterNumber > 4) {
+      continue;
+    } else if (filterNumber > filterCount) {
+      zowelog(NULL, loggingId, ZOWE_LOG_WARNING,
+        "Http request parameter %s is ignored because it does not correspond with the filterCount=%d http request parameter.\n",
+        parm->specification->name, filterCount);
+      continue;
+    }
+
+    if (strncmp(FAPPLDATA, parm->specification->name, strlen(FAPPLDATA)) == 0) {
+      processApplDataFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber);
+    }
+    else if (strncmp(FASID, parm->specification->name, strlen(FASID)) == 0) {
+      processAsidFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber);
+    }
+    else if (strncmp(FLOCALIPPREFIX, parm->specification->name, strlen(FLOCALIPPREFIX)) == 0) {
+      processIpAddressPrefixFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber, TRUE);
+    }
+    else if (strncmp(FLOCALIP, parm->specification->name, strlen(FLOCALIP)) == 0) {
+      processIpAddressFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber, TRUE);
+    }
+    else if (strncmp(FLOCALPORT, parm->specification->name, strlen(FLOCALPORT)) == 0) {
+      processPortFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber, TRUE);
+    }
+    else if (strncmp(FREMOTEIPPREFIX, parm->specification->name, strlen(FREMOTEIPPREFIX)) == 0) {
+      processIpAddressPrefixFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber, FALSE);
+    }
+    else if (strncmp(FREMOTEIP, parm->specification->name, strlen(FREMOTEIP)) == 0) {
+      processIpAddressFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber, FALSE);
+    }
+    else if (strncmp(FREMOTEPORT, parm->specification->name, strlen(FREMOTEPORT)) == 0) {
+      processPortFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber, FALSE);
+    }
+    else if (strncmp(FRESOURCEID, parm->specification->name, strlen(FRESOURCEID)) == 0) {
+      processResourceIdFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber);
+    }
+    else if (strncmp(FRESOURCENAME, parm->specification->name, strlen(FRESOURCENAME)) == 0) {
+      processResourceNameFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber);
+    }
+    else if (strncmp(FSERVRESOURCEID, parm->specification->name, strlen(FSERVRESOURCEID)) == 0) {
+      processServerResourceIdFilter(firstNWMFilter + filterNumber - 1, parm, filterNumber);
+    }
+    else {
+      zowelog(NULL, loggingId, ZOWE_LOG_WARNING,
+        "Http request parameter %s is not supported.\n", parm->specification->name);
+    }
+  }
+}
+
+int getFilterCount(HttpRequestParam *firstParm) {
+  HttpRequestParam *parm;
+  for (parm = firstParm; parm != NULL; parm = parm->next) {
+    if (strcmp(FCOUNT, parm->specification->name) == 0) {
+      zowelog(NULL, loggingId, ZOWE_LOG_DEBUG,
+          "Number of NMI filters specified: %d.\n", parm->intValue);
+      return parm->intValue;
+    }
+  }
+  return 0;
+}
+
+int getPortMinFilter(HttpRequestParam *firstParm) {
+  HttpRequestParam *parm;
+  for (parm = firstParm; parm != NULL; parm = parm->next) {
+    if (strcmp(FPORTMIN, parm->specification->name) == 0) {
+      zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Min port filter is set to %d.\n", parm->intValue);
+      return parm->intValue;
+    }
+  }
+  return 1;
+}
+
+int getPortMaxFilter(HttpRequestParam *firstParm) {
+  HttpRequestParam *parm;
+  for (parm = firstParm; parm != NULL; parm = parm->next) {
+    if (strcmp(FPORTMAX, parm->specification->name) == 0) {
+      zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Max port filter is set to %d.\n", parm->intValue);
+      return parm->intValue;
+    }
+  }
+  return 65535;
+}
+
+char *getRsvNameFilter(HttpRequestParam *firstParm) {
+  HttpRequestParam *parm;
+  for (parm = firstParm; parm != NULL; parm = parm->next) {
+    if (strcmp(FPORTRSVNAME, parm->specification->name) == 0) {
+      zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
+          "Port reserved name filter is set to %s.\n", parm->stringValue);
+      return parm->stringValue;
+    }
+  }
+  return NULL;
+}
 
 /* Build and dispatch a request to the NWM service */
 
 NMIBufferType *buildAndExecuteNWMService(int *bufferResponseLength,
                                 CrossMemoryServerName *privilegedServerName,
                                 char *tcpip,
-                                unsigned short nwmRequestType) {
-  int attempts = 0;
+                                unsigned short nwmRequestType,
+                                HttpRequestParam *firstParm) {
+  int attempts = 0, i;
   int bufferLength = NMIBUFSIZE;
-  
+
   while (attempts < 2) {
     NMIBufferType *nmiBuffer = (NMIBufferType *)safeMalloc(bufferLength, "NMI buffer");
     if (nmiBuffer == NULL) {
       *bufferResponseLength = 0;
       return NULL;
     }
+
+    memset(nmiBuffer, 0, sizeof(NMIBufferType));
+    NWMFilter *filter = nmiBuffer->filters;
+    for (i = 0; i < MAX_NWM_FILTERS; i++, filter++) {
+      filter->NWMFilterIdent = NWMFILTERIDENTIFIER;
+    }
+
     *bufferResponseLength = bufferLength;
     /* Fill Header */
     nmiBuffer->header.NWMHeaderIdent=NWMHEADERIDENTIFIER;
     nmiBuffer->header.NWMHeaderLength=sizeof(NWMHeader);
     nmiBuffer->header.NWMVersion=NWMVERSION1;
-    
-    nmiBuffer->header.NWMType=nwmRequestType; 
+
+    nmiBuffer->header.NWMType=nwmRequestType;
     nmiBuffer->header.NWMBytesNeeded=0;
     nmiBuffer->header.NWMInputDataDescriptors.NWMFiltersDesc.NWMTOffset=sizeof(NWMHeader);
     nmiBuffer->header.NWMInputDataDescriptors.NWMFiltersDesc.NWMTLength=sizeof(NWMFilter);
-    nmiBuffer->header.NWMInputDataDescriptors.NWMFiltersDesc.NWMTNumber=0; // No filter active
-    
+    nmiBuffer->header.NWMInputDataDescriptors.NWMFiltersDesc.NWMTNumber=0;
+
+    int filterCount = getFilterCount(firstParm);
+
+    if (firstParm != NULL && filterCount != 0) {
+      nmiBuffer->header.NWMInputDataDescriptors.NWMFiltersDesc.NWMTNumber=filterCount;
+      configureNWMFilters(nmiBuffer->filters, firstParm, filterCount);
+    }
+
     int currTraceLevel = logGetLevel(NULL, loggingId);
 
     zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
             "request buffer:\n");
     zowedump(NULL, loggingId, ZOWE_LOG_DEBUG2,
-            (char*)nmiBuffer, sizeof(NWMHeader));
+            (char*)nmiBuffer, sizeof(NWMHeader) + filterCount * sizeof(NWMFilter));
 
     attempts++;
 
@@ -77,7 +374,7 @@ NMIBufferType *buildAndExecuteNWMService(int *bufferResponseLength,
     memset(jobName.value, 0x40, sizeof(ZISNWMJobName));
     memcpy(jobName.value, tcpip, strlen(tcpip));
     ZISNWMServiceStatus zisStatus = {0};
-      
+
 
     int zisRC = zisCallNWMService(privilegedServerName,
                                   jobName, (char *)nmiBuffer, bufferLength,
@@ -107,7 +404,7 @@ NMIBufferType *buildAndExecuteNWMService(int *bufferResponseLength,
         zowelog(NULL, loggingId, ZOWE_LOG_DEBUG2,
                 "NWM retry with more space 0x%x\n", bufferLength);
         zowedump(NULL, loggingId, ZOWE_LOG_DEBUG2,
-                (char*)nmiBuffer, 0x100);
+                (char*)nmiBuffer, sizeof(NWMHeader));
 
         safeFree((char *)nmiBuffer, oldBufferLength);
         nmiBuffer = NULL;
@@ -125,12 +422,12 @@ NMIBufferType *buildAndExecuteNWMService(int *bufferResponseLength,
         safeFree((char *)nmiBuffer, bufferLength);
         nmiBuffer = NULL;
         *bufferResponseLength = 0;
-        return NULL; 
+        return NULL;
       }
     } else {
       return nmiBuffer;
     }
-  } 
+  }
   return NULL; // this statement should never be reached;
 }
 
@@ -205,7 +502,11 @@ int processAndRespondConnections(HttpResponse *response, CrossMemoryServerName *
   NMIBufferType *respBuffer = NULL; // Make sure the memory pointed by the pointer is released.
   int rbl = 0;       // response buffer length; used for safeFree function
 
-  respBuffer = buildAndExecuteNWMService(&rbl, privilegedServerName, strupcase(tcpip), NWMTCPCONNTYPE);
+  respBuffer = buildAndExecuteNWMService(&rbl,
+                                        privilegedServerName,
+                                        strupcase(tcpip),
+                                        NWMTCPCONNTYPE,
+                                        response->request->processedParamList);
   if (respBuffer == NULL) {
     respondWithJsonError(response, "Check zssServer log for more details", 500, "Internal Server Error");
     return 0;
@@ -280,7 +581,11 @@ int processAndRespondListeners(HttpResponse *response, CrossMemoryServerName *pr
   NMIBufferType *respBuffer = NULL; // Make sure the memory pointed by the pointer is released.
   int rbl = 0;       // response buffer length; used for safeFree function
 
-  respBuffer = buildAndExecuteNWMService(&rbl, privilegedServerName, strupcase(tcpip), NWMTCPLISTENTYPE);
+  respBuffer = buildAndExecuteNWMService(&rbl,
+                                        privilegedServerName,
+                                        strupcase(tcpip),
+                                        NWMTCPLISTENTYPE,
+                                        response->request->processedParamList);
   if (respBuffer == NULL) {
     respondWithJsonError(response, "Check zssServer log for more details", 500, "Internal Server Error");
     return 0;
@@ -422,12 +727,21 @@ int processAndRespondInfo(HttpResponse *response, CrossMemoryServerName *privile
   NMIBufferType *respBufIf = NULL;   // Make sure the memory pointed by the pointer is released.
   int rblp = 0, rbli = 0;       // response buffer length; used for safeFree function
 
-  respBufProf = buildAndExecuteNWMService(&rblp, privilegedServerName, strupcase(tcpip), NWMPROFILETYPE);
+  respBufProf = buildAndExecuteNWMService(&rblp,
+                                        privilegedServerName,
+                                        strupcase(tcpip),
+                                        NWMPROFILETYPE,
+                                        NULL);
+
   if (respBufProf == NULL) {
     respondWithJsonError(response, "Check zssServer log for more details", 500, "Internal Server Error");
     return 0;
   }
-  respBufIf = buildAndExecuteNWMService(&rbli, privilegedServerName, strupcase(tcpip), NWMIFSTYPE);
+  respBufIf = buildAndExecuteNWMService(&rbli,
+                                        privilegedServerName,
+                                        strupcase(tcpip),
+                                        NWMIFSTYPE,
+                                        NULL);
   if (respBufIf == NULL) {
     safeFree((char *)respBufProf, rblp);
     respondWithJsonError(response, "Check zssServer log for more details", 500, "Internal Server Error");
@@ -475,16 +789,20 @@ int processAndRespondInfo(HttpResponse *response, CrossMemoryServerName *privile
 
 int processAndRespondPorts(HttpResponse *response, CrossMemoryServerName *privilegedServerName,
                                 char *tcpip) {
-  int i;
-  void *collectionPointer;
-  NMTP_PORT *portSection;
-  int portEntryCount;
-  NMIBufferType *respBuffer = NULL; // Make sure the memory pointed by the pointer is released.
+  int i, portEntryCount;
   int rbl = 0;       // response buffer length; used for safeFree function
+  void *collectionPointer;
   char localAddress[INET6_ADDRSTRLEN];
   unsigned short localPort;
+  char jobname[9], safname[9];
+  NMTP_PORT *portSection;
+  NMIBufferType *respBuffer = NULL; // Make sure the memory pointed by the pointer is released.
 
-  respBuffer = buildAndExecuteNWMService(&rbl, privilegedServerName, strupcase(tcpip), NWMPROFILETYPE);
+  respBuffer = buildAndExecuteNWMService(&rbl,
+                                        privilegedServerName,
+                                        strupcase(tcpip),
+                                        NWMPROFILETYPE,
+                                        NULL);
   if (respBuffer == NULL) {
     respondWithJsonError(response, "Check zssServer log for more details", 500, "Internal Server Error");
     return 0;
@@ -494,6 +812,17 @@ int processAndRespondPorts(HttpResponse *response, CrossMemoryServerName *privil
   if (portSection == NULL || portSection->NMTP_PORTEye != NMTP_PORTEYEC) {
     safeFree((char *)respBuffer, rbl);
     respondWithJsonError(response, "Check zssServer log for more details", 500, "Internal Server Error");
+    return 0;
+  }
+
+  int portMinFilter = getPortMinFilter(response->request->processedParamList);
+  int portMaxFilter = getPortMaxFilter(response->request->processedParamList);
+  char *portRsvName = getRsvNameFilter(response->request->processedParamList);
+
+  if (strlen(portRsvName) > 8) {
+    safeFree((char *)respBuffer, rbl);
+    respondWithJsonError(response, FPORTRSVNAME " parameter exceeded the allowable length (8 chars).", 500,
+                                   "Internal Server Error");
     return 0;
   }
 
@@ -513,8 +842,30 @@ int processAndRespondPorts(HttpResponse *response, CrossMemoryServerName *privil
               (char*)portSection - sizeof(NMTP_PORT), 3*sizeof(NMTP_PORT));
       continue;
     }
+    // Evaluate portMin and portMax filters
+    if ((portSection->NMTP_PORTBegNum < portMinFilter || portSection->NMTP_PORTBegNum > portMaxFilter) &&
+        (portSection->NMTP_PORTEndNum < portMinFilter || portSection->NMTP_PORTEndNum > portMaxFilter)) {
+      continue;
+    }
+    // Evaluate portRsvName filter
+    memset(jobname, 0, 9);
+    memset(safname, 0, 9);
+    memcpy(jobname, portSection->NMTP_PORTJobName, findTrimmedLength(portSection->NMTP_PORTJobName));
+    memcpy(safname, portSection->NMTP_PORTSafName, findTrimmedLength(portSection->NMTP_PORTSafName));
+
+    if (portRsvName != NULL &&
+        fnmatch(portRsvName, jobname, FNM_NOESCAPE) != 0 &&
+        fnmatch(portRsvName, safname, FNM_NOESCAPE) != 0) {
+      continue;
+    }
 
     jsonStartObject(p, NULL);
+
+    jsonAddUInt(p,   "portNumber",    portSection->NMTP_PORTBegNum);
+    jsonAddUInt(p,   "portNumberEnd", portSection->NMTP_PORTEndNum);
+
+    jsonAddLimitedString(p, "jobname",     portSection->NMTP_PORTJobName, findTrimmedLength(portSection->NMTP_PORTJobName));
+    jsonAddLimitedString(p, "safname",     portSection->NMTP_PORTSafName, findTrimmedLength(portSection->NMTP_PORTSafName));
 
     jsonStartObject(p, "flags");
     portSection->NMTP_PORTFlags & NMTP_PORTIPV6
@@ -591,12 +942,6 @@ int processAndRespondPorts(HttpResponse *response, CrossMemoryServerName *privil
       : jsonAddBoolean(p, "WHENBIND", FALSE);
     jsonEndObject(p);
 
-    jsonAddUInt(p,   "portNumber",    portSection->NMTP_PORTBegNum);
-    jsonAddUInt(p,   "portNumberEnd", portSection->NMTP_PORTEndNum);
-
-    jsonAddLimitedString(p, "jobname",     portSection->NMTP_PORTJobName, findTrimmedLength(portSection->NMTP_PORTJobName));
-    jsonAddLimitedString(p, "safname",     portSection->NMTP_PORTSafName, findTrimmedLength(portSection->NMTP_PORTSafName));
-
     if(portSection->NMTP_PORTRsvOptions & NMTP_PORTRBIND){
       if(portSection->NMTP_PORTFlags & NMTP_PORTIPV6){
         char str[INET6_ADDRSTRLEN];
@@ -608,14 +953,14 @@ int processAndRespondPorts(HttpResponse *response, CrossMemoryServerName *privil
         jsonAddString(p, "bindAddr", str);
       }
     } else {
-      jsonAddString(p, "bindAddr",     "");
+      jsonAddString(p, "bindAddr", "");
     }
 
     jsonEndObject(p);
   }
 
   jsonEndArray(p);
-  jsonEnd(p); 
+  jsonEnd(p);
 
   safeFree((char *)respBuffer, rbl);
   finishResponse(response);
@@ -651,7 +996,7 @@ static int serveMappingService(HttpService *service, HttpResponse *response) {
     // Process "connections" request type
     if (strcasecmp("connections", requestType) == 0) {
       processAndRespondConnections(response, privilegedServerName, strupcase(tcpip));
-    } 
+    }
     // Process "connections" request type
     else if (strcasecmp("ports", requestType) == 0) {
       processAndRespondPorts(response, privilegedServerName, strupcase(tcpip));
@@ -666,27 +1011,26 @@ static int serveMappingService(HttpService *service, HttpResponse *response) {
     }
     else {
       respondWithJsonError(response, "Endpoint not found.", 404, "Not Found");
-      return 0; 
-    }   
+      return 0;
+    }
   }
   else {
     jsonPrinter *p = respondWithJsonPrinter(response);
-      
+
     setResponseStatus(response, 405, "Method Not Allowed");
     setDefaultJSONRESTHeaders(response);
     addStringHeader(response, "Allow", "GET");
     writeHeader(response);
-    
+
     jsonStart(p);
     {
       jsonAddString(p, "error", "Only GET requests are supported");
     }
-    jsonEnd(p); 
+    jsonEnd(p);
     finishResponse(response);
   }
   return 0;
 }
-
 
 void ipExplorerDataServiceInstaller(DataService *dataService, HttpServer *server)
 {
@@ -696,16 +1040,27 @@ void ipExplorerDataServiceInstaller(DataService *dataService, HttpServer *server
   httpService->runInSubtask = TRUE;
   httpService->doImpersonation = FALSE;
 
+  // Maximum number of filters for NMI (NWM) service is 4 filters.
+  httpService->paramSpecList =  makeStringParamSpec(FPORTRSVNAME, SERVICE_ARG_OPTIONAL, \
+                                makeIntParamSpec(FCOUNT, SERVICE_ARG_OPTIONAL | SERVICE_ARG_HAS_VALUE_BOUNDS, 0, 0, 0, 4,
+                                makeIntParamSpec(FPORTMIN, SERVICE_ARG_OPTIONAL | SERVICE_ARG_HAS_VALUE_BOUNDS, 0, 0, 1, 65535,
+                                makeIntParamSpec(FPORTMAX, SERVICE_ARG_OPTIONAL | SERVICE_ARG_HAS_VALUE_BOUNDS, 0, 0, 1, 65535,
+                                NMIFILTER(FNUMBER1,
+                                NMIFILTER(FNUMBER2,
+                                NMIFILTER(FNUMBER3,
+                                NMIFILTER(FNUMBER4, NULL))))))));
+
   loggingId = dataService->loggingIdentifier;
+
 }
 
 /*
   This program and the accompanying materials are
   made available under the terms of the Eclipse Public License v2.0 which accompanies
   this distribution, and is available at https://www.eclipse.org/legal/epl-v20.html
-  
+
   SPDX-License-Identifier: EPL-2.0
-  
+
   Copyright Contributors to the Zowe Project.
 */
 
