@@ -11,11 +11,13 @@ import { ReactMVDResources } from '../common/types';
 
 interface IPExplorerApi {
     resources: ReactMVDResources,
+    tcpipJobName: string,
 }
 
 class IPExplorerApi {
     constructor(resources: ReactMVDResources){
         this.resources = resources;
+        this.tcpipJobName = "tcpip";
     }
 
     public getPreferences(): Promise<Response> {
@@ -34,17 +36,17 @@ class IPExplorerApi {
     }
 
     public getInfo(): Promise<Response> {
-        const destination = ZoweZLUX.uriBroker.pluginRESTUri(this.resources.pluginDefinition.getBasePlugin(), 'ipExplorer', 'tcpip32/info');
+        const destination = ZoweZLUX.uriBroker.pluginRESTUri(this.resources.pluginDefinition.getBasePlugin(), 'ipExplorer', `${this.tcpipJobName}/info`);
         return this.doGetRequest(destination);
     }
 
     public getPorts(): Promise<Response> {
-        const destination = ZoweZLUX.uriBroker.pluginRESTUri(this.resources.pluginDefinition.getBasePlugin(), 'ipExplorer', 'tcpip32/ports');
+        const destination = ZoweZLUX.uriBroker.pluginRESTUri(this.resources.pluginDefinition.getBasePlugin(), 'ipExplorer', `${this.tcpipJobName}/ports`);
         return this.doGetRequest(destination);
     }
 
     public getConnections(): Promise<Response> {
-        const destination = ZoweZLUX.uriBroker.pluginRESTUri(this.resources.pluginDefinition.getBasePlugin(), 'ipExplorer', 'tcpip32/connections');
+        const destination = ZoweZLUX.uriBroker.pluginRESTUri(this.resources.pluginDefinition.getBasePlugin(), 'ipExplorer', `${this.tcpipJobName}/connections`);
         return this.doGetRequest(destination);
     }
 
