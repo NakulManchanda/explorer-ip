@@ -13,6 +13,8 @@ import {
   Button,
   ButtonGroup,
   IconButton,
+  Menu,
+  MenuItem,
   Paper,
   Table,
   TableBody,
@@ -44,6 +46,7 @@ interface RPTableState {
   order: 'asc' | 'desc',
   orderBy: HeadCell["id"],
   tcp: boolean,
+  openJobActions: any[],
 }
 
 class ReservedPortsTable extends React.Component<TableProps, RPTableState> {
@@ -54,6 +57,7 @@ class ReservedPortsTable extends React.Component<TableProps, RPTableState> {
       order: null,
       orderBy: null,
       tcp: true,
+      openJobActions: null,
     }
   }
 
@@ -69,11 +73,33 @@ class ReservedPortsTable extends React.Component<TableProps, RPTableState> {
     return !!orderBy && (order !== this.props.preferredSorting.order || orderBy !== this.props.preferredSorting.orderBy);
   }
 
+  findActions(): void {
+    const dispatcher = ZoweZLUX.dispatcher;
+    const screenContext: any = {
+      sourcePluginID: "org.zowe.explorer-ip",
+      type: "open-job",
+    };
+    const recognizers = dispatcher.getRecognizers(screenContext);
+    console.log('find recognizers 222', recognizers);
+    if (recognizers.length > 0) {
+      const actions = recognizers
+        .map(recognizer => dispatcher.getAction(recognizer))
+        .filter(action => !!action)
+        .map(action => {
+          action.type = dispatcher.constants.ActionType[action.type];
+          action.targetMode = dispatcher.constants.ActionTargetMode[action.targetMode];
+          return action;
+        })
+        this.setState({openJobActions: actions});
+    } 
+  }
+
   componentDidMount() {
     const {ports, error} = this.props.ports;
     if (!ports.length || error) {
       this.props.getPorts();
     }
+    this.findActions();
   }
 
   componentWillUnmount() {
@@ -124,7 +150,11 @@ class ReservedPortsTable extends React.Component<TableProps, RPTableState> {
                 {stableSort(filteredPorts, getComparator(order, orderBy))
                   .slice(0, ROWLIMIT)
                   .map((row, index) => <TableRow key={index}>
-                    {headCells.map(cell => <TableCell align={cell.numeric ? 'right' : 'left'}>{row[cell.id]}</TableCell>)}
+                    {headCells.map(cell => <TableCell align={cell.numeric ? 'right' : 'left'}>
+                      {(cell.id === 'jobname' && this.state.openJobActions)
+                        ? <JobCellWithMenu jobName={row[cell.id]} actions={this.state.openJobActions}/>
+                        : row[cell.id]
+                      }</TableCell>)}
                   </TableRow>)
                 }
                 {filteredPorts.length > ROWLIMIT
@@ -145,6 +175,40 @@ class ReservedPortsTable extends React.Component<TableProps, RPTableState> {
       </div>
     );
   }
+}
+
+function JobCellWithMenu(props: any) {
+  const {jobName, actions} = props;
+  const dispatcher = ZoweZLUX.dispatcher;
+  const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
+
+  const handleClick = (event: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
+    setAnchorEl(event.currentTarget);
+  };
+
+  const handleClose = (action) => {
+    setAnchorEl(null);
+    if (action) {
+      const parameters = {owner: '*', jobId: '*', prefix: jobName};
+      const argumentData = {'data': parameters};
+      dispatcher.invokeAction(action, argumentData);
+    }
+  };
+
+  return (
+    <div>
+      <div onClick={handleClick} style={{textDecoration: 'underline', cursor: 'pointer'}}>{jobName}</div> 
+      <Menu
+        id="job-menu"
+        anchorEl={anchorEl}
+        keepMounted
+        open={Boolean(anchorEl)}
+        onClose={handleClose}
+      >
+        {actions.map(action => <MenuItem onClick={() => handleClose(action)}>{action.defaultName}</MenuItem>)}
+      </Menu>
+    </div>
+  );
 }
 
 export default withTranslation('translation')(ReservedPortsTable);
