@@ -46,7 +46,7 @@ interface RPTableState {
   order: 'asc' | 'desc',
   orderBy: HeadCell["id"],
   tcp: boolean,
-  openJobActions: any[],
+  openJobActions: ZLUX.Action[],
 }
 
 class ReservedPortsTable extends React.Component<TableProps, RPTableState> {
@@ -80,12 +80,11 @@ class ReservedPortsTable extends React.Component<TableProps, RPTableState> {
       type: "open-job",
     };
     const recognizers = dispatcher.getRecognizers(screenContext);
-    console.log('find recognizers 222', recognizers);
     if (recognizers.length > 0) {
       const actions = recognizers
-        .map(recognizer => dispatcher.getAction(recognizer))
-        .filter(action => !!action)
-        .map(action => {
+        .map((recognizer: ZLUX.RecognizerObject) => dispatcher.getAction(recognizer))
+        .filter((action: ZLUX.Action) => !!action)
+        .map((action: ZLUX.Action) => {
           action.type = dispatcher.constants.ActionType[action.type];
           action.targetMode = dispatcher.constants.ActionTargetMode[action.targetMode];
           return action;
@@ -151,7 +150,7 @@ class ReservedPortsTable extends React.Component<TableProps, RPTableState> {
                   .slice(0, ROWLIMIT)
                   .map((row, index) => <TableRow key={index}>
                     {headCells.map(cell => <TableCell align={cell.numeric ? 'right' : 'left'}>
-                      {(cell.id === 'jobname' && this.state.openJobActions)
+                      {(cell.id === 'jobname' && this.state.openJobActions && this.state.openJobActions.length > 0)
                         ? <JobCellWithMenu jobName={row[cell.id]} actions={this.state.openJobActions}/>
                         : row[cell.id]
                       }</TableCell>)}
@@ -177,7 +176,7 @@ class ReservedPortsTable extends React.Component<TableProps, RPTableState> {
   }
 }
 
-function JobCellWithMenu(props: any) {
+function JobCellWithMenu(props: {jobName: string | number, actions: ZLUX.Action[]}) {
   const {jobName, actions} = props;
   const dispatcher = ZoweZLUX.dispatcher;
   const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
@@ -186,7 +185,7 @@ function JobCellWithMenu(props: any) {
     setAnchorEl(event.currentTarget);
   };
 
-  const handleClose = (action) => {
+  const handleClose = (action: ZLUX.Action) => {
     setAnchorEl(null);
     if (action) {
       const parameters = {owner: '*', jobId: '*', prefix: jobName};
@@ -205,7 +204,7 @@ function JobCellWithMenu(props: any) {
         open={Boolean(anchorEl)}
         onClose={handleClose}
       >
-        {actions.map(action => <MenuItem onClick={() => handleClose(action)}>{action.defaultName}</MenuItem>)}
+        {actions.map((action: ZLUX.Action) => <MenuItem onClick={() => handleClose(action)}>{action.defaultName}</MenuItem>)}
       </Menu>
     </div>
   );
